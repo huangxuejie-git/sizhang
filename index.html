@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#F2ECDF" id="themeColor">
+  <title>私账 · 资产实时看板</title>
+  <meta name="description" content="把股票、基金和现金收进一本账，实时看清总资产与今日变化。数据只保存在本机。">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png">
+  <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="私账">
+  <link rel="preload" href="./assets/fonts/instrument-serif-regular.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="./assets/fonts/plex-mono-400.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+<div class="grain" aria-hidden="true"></div>
+
+<div class="app" id="app">
+  <header class="topbar">
+    <a class="brand" href="#top" aria-label="私账首页">
+      <span class="brand-seal" aria-hidden="true">账</span>
+      <span class="brand-text"><strong>私账</strong><small>PRIVATE LEDGER</small></span>
+    </a>
+    <div class="top-actions">
+      <button class="icon-btn" id="refreshBtn" type="button" aria-label="立即刷新行情" title="立即刷新">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7"/></svg>
+      </button>
+      <button class="icon-btn" id="privacyBtn" type="button" aria-label="隐藏金额" title="隐藏金额">
+        <svg class="ico-eye" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="3.2"/></svg>
+        <svg class="ico-eye-off" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3l18 18M10.6 6.1A9.8 9.8 0 0 1 12 6c6 0 9.5 6 9.5 6a17 17 0 0 1-2.1 2.8M6.2 6.7C3.8 8.5 2.5 12 2.5 12S6 18 12 18a9.6 9.6 0 0 0 4.1-.9M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg>
+      </button>
+      <button class="icon-btn" id="themeBtn" type="button" aria-label="切换外观" title="切换外观">
+        <svg class="ico-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14.2A8.5 8.5 0 0 1 9.8 3.5 8.5 8.5 0 1 0 20.5 14.2Z"/></svg>
+        <svg class="ico-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M18.7 5.3l-1.4 1.4M6.7 17.3l-1.4 1.4"/></svg>
+      </button>
+      <button class="icon-btn" id="settingsBtn" type="button" aria-label="设置" title="设置">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2.2"/><circle cx="9" cy="17" r="2.2"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <div class="banner demo-banner" id="demoBanner" hidden>
+    <span class="banner-dot"></span>
+    <span>示例账本，数据仅作演示</span>
+    <button type="button" id="demoReplaceBtn">换成我的</button>
+  </div>
+  <div class="banner offline-banner" id="offlineBanner" hidden>
+    <span class="banner-dot"></span>
+    <span id="offlineText">当前离线，显示上次行情</span>
+    <button type="button" id="offlineRetryBtn">重试</button>
+  </div>
+
+  <main id="top">
+    <section class="hero">
+      <span class="hero-watermark" aria-hidden="true">资产</span>
+      <div class="hero-head">
+        <span class="eyebrow">资产总额 <i>TOTAL ASSETS</i></span>
+        <span class="market-pill" id="marketPill"><i></i><span id="marketText">连接行情中</span></span>
+      </div>
+      <div class="amount" id="totalAmount" aria-live="polite" aria-label="资产总额">
+        <span class="cur">¥</span><span class="int" id="amountInt">—</span><span class="dec" id="amountDec"></span>
+      </div>
+      <div class="delta-line" id="deltaLine">
+        <span class="delta" id="dayPnl">正在获取行情</span>
+        <span class="pct" id="dayPct" hidden></span>
+        <span class="delta-label" id="deltaLabel"></span>
+      </div>
+      <div class="hero-meta">
+        <div><span>累计盈亏</span><b class="money" id="totalPnl">—</b></div>
+        <div><span>现金</span><b class="money" id="cashMeta">—</b></div>
+        <div><span>更新于</span><b id="updatedAt">—</b></div>
+      </div>
+      <span class="live-seal" id="liveSeal" aria-hidden="true">实时</span>
+    </section>
+
+    <section class="card chart-card reveal">
+      <div class="card-head">
+        <div class="card-title"><h2>资产走势</h2><span class="sub">INTRADAY</span></div>
+        <div class="chart-meta"><span id="chartDate">—</span><span class="dot-sep"></span><span id="chartBaseline">—</span></div>
+      </div>
+      <div class="chart-wrap" id="chartWrap">
+        <svg class="chart" id="chartSvg" viewBox="0 0 600 220" preserveAspectRatio="none" aria-hidden="true"></svg>
+        <div class="chart-tip" id="chartTip" hidden></div>
+        <div class="chart-empty" id="chartEmpty">正在记录今日走势…</div>
+      </div>
+      <div class="chart-axis" id="chartAxis"><span>09:30</span><span>11:30</span><span>15:00</span></div>
+    </section>
+
+    <section class="card alloc-card reveal">
+      <div class="card-head">
+        <div class="card-title"><h2>资产配置</h2><span class="sub">ALLOCATION</span></div>
+        <span class="alloc-total money" id="allocTotal">—</span>
+      </div>
+      <div class="alloc-bar" id="allocBar" aria-hidden="true"></div>
+      <div class="alloc-legend" id="allocLegend"></div>
+    </section>
+
+    <section class="holdings reveal" id="holdings">
+      <div class="section-head">
+        <div class="card-title"><h2>持仓明细</h2><span class="sub" id="holdingCount">0 项资产</span></div>
+        <button class="text-btn" id="editBtn" type="button">编辑
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+        </button>
+      </div>
+      <div id="holdingGroups"></div>
+      <div class="empty-holdings" id="emptyHoldings" hidden>
+        <span class="empty-mark">账</span>
+        <p>账本还是空的。</p>
+        <button class="btn small primary" id="emptyAddBtn" type="button">添加第一笔资产</button>
+      </div>
+    </section>
+
+    <footer class="footnote">
+      <p>股票行情来自腾讯证券公开接口，约 5–10 秒延迟。场外基金采用最新公布净值，每交易日更新，非实时估值。</p>
+      <p>所有数据只保存在你的手机浏览器里 · 不构成投资建议</p>
+      <span class="foot-mark">私账 · MMXXVI</span>
+    </footer>
+  </main>
+
+  <nav class="dock" aria-label="主导航">
+    <button class="dock-item active" data-nav="top" type="button">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V9M10 19V5M16 19v-7M22 19H2"/></svg>
+      <span>总览</span>
+    </button>
+    <button class="dock-item" data-nav="holdings" type="button">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="14" rx="2"/><path d="M3.5 10h17M8 5v14"/></svg>
+      <span>持仓</span>
+    </button>
+    <button class="dock-add" id="dockAdd" type="button" aria-label="添加资产">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+    </button>
+    <button class="dock-item" data-nav="settings" type="button">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h8M16 7h4M4 17h4M12 17h8"/><circle cx="14" cy="7" r="2.2"/><circle cx="8" cy="17" r="2.2"/></svg>
+      <span>设置</span>
+    </button>
+  </nav>
+</div>
+
+<!-- 添加类型选择 -->
+<div class="modal" id="addModal" aria-hidden="true">
+  <div class="sheet sheet-compact" role="dialog" aria-modal="true" aria-labelledby="addTitle">
+    <div class="sheet-grabber"></div>
+    <div class="sheet-head">
+      <div><span class="sub">NEW ASSET</span><h2 id="addTitle">添加资产</h2></div>
+      <button class="icon-btn sheet-close" type="button" data-close="addModal" aria-label="关闭">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+    <div class="add-choices">
+      <button class="add-choice" type="button" data-add-kind="stock">
+        <span class="choice-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 17l5-5 4 3 7-8"/><path d="M16 7h4v4"/></svg></span>
+        <span><b>股票 / 场内 ETF</b><small>输入代码，实时行情</small></span>
+        <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+      </button>
+      <button class="add-choice" type="button" data-add-kind="fund">
+        <span class="choice-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3Z"/><path d="M4 7.5l8 4.5 8-4.5M12 12v9"/></svg></span>
+        <span><b>场外基金</b><small>按最新公布净值计算</small></span>
+        <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+      </button>
+      <button class="add-choice" type="button" data-add-kind="cash">
+        <span class="choice-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="18" height="13" rx="2.5"/><path d="M3 10h18M16 15h2"/></svg></span>
+        <span><b>现金 / 存款</b><small>银行卡、余额宝、现金</small></span>
+        <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+      </button>
+    </div>
+    <button class="import-link" type="button" id="batchBtn">批量粘贴导入 <span>→</span></button>
+  </div>
+</div>
+
+<!-- 资产编辑 -->
+<div class="modal" id="editorModal" aria-hidden="true">
+  <div class="sheet sheet-full" role="dialog" aria-modal="true" aria-labelledby="editorTitle">
+    <div class="sheet-grabber"></div>
+    <div class="sheet-head">
+      <div><span class="sub">MY LEDGER</span><h2 id="editorTitle">资产清单</h2></div>
+      <button class="icon-btn sheet-close" type="button" data-close="editorModal" aria-label="关闭">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+    <div class="editor-summary">
+      <span>账本合计</span>
+      <b class="money" id="editorTotal">—</b>
+      <small id="editorCount">0 项</small>
+    </div>
+    <div class="sheet-body" id="editorBody"></div>
+    <div class="sheet-foot editor-foot">
+      <button class="btn ghost" type="button" id="editorBatchBtn">批量导入</button>
+      <button class="btn ghost" type="button" id="editorExportBtn">导出备份</button>
+    </div>
+  </div>
+</div>
+
+<!-- 单项表单 -->
+<div class="modal" id="formModal" aria-hidden="true">
+  <div class="sheet sheet-full" role="dialog" aria-modal="true" aria-labelledby="formTitle">
+    <div class="sheet-grabber"></div>
+    <div class="sheet-head">
+      <div><span class="sub" id="formKicker">ASSET</span><h2 id="formTitle">添加资产</h2></div>
+      <button class="icon-btn sheet-close" type="button" data-close="formModal" aria-label="关闭">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+    <form class="sheet-body form-body" id="assetForm" novalidate>
+      <div class="lookup-card" id="lookupCard" hidden>
+        <span class="lookup-dot"></span>
+        <div><b id="lookupName">—</b><small id="lookupMeta">—</small></div>
+      </div>
+      <div id="formFields"></div>
+      <p class="form-note" id="formNote"></p>
+      <div class="form-error" id="formError" hidden></div>
+    </form>
+    <div class="sheet-foot form-foot">
+      <button class="btn danger-text" type="button" id="deleteAssetBtn" hidden>删除</button>
+      <button class="btn primary grow" type="submit" form="assetForm" id="saveAssetBtn">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 批量导入 -->
+<div class="modal" id="batchModal" aria-hidden="true">
+  <div class="sheet sheet-full" role="dialog" aria-modal="true" aria-labelledby="batchTitle">
+    <div class="sheet-grabber"></div>
+    <div class="sheet-head">
+      <div><span class="sub">QUICK IMPORT</span><h2 id="batchTitle">批量导入</h2></div>
+      <button class="icon-btn sheet-close" type="button" data-close="batchModal" aria-label="关闭">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+    <div class="sheet-body">
+      <p class="batch-help">每行一项，用空格分隔：<br><code>股票 600519 100 1450</code><br><code>基金 005827 50000 2.05</code><br><code>现金 活期 186420</code></p>
+      <textarea class="batch-input" id="batchInput" spellcheck="false" placeholder="股票 600519 100 1450&#10;基金 005827 50000 2.05&#10;现金 活期 186420"></textarea>
+      <div class="form-error" id="batchError" hidden></div>
+    </div>
+    <div class="sheet-foot">
+      <button class="btn primary grow" type="button" id="batchSaveBtn">导入</button>
+    </div>
+  </div>
+</div>
+
+<!-- 设置 -->
+<div class="modal" id="settingsModal" aria-hidden="true">
+  <div class="sheet sheet-full" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+    <div class="sheet-grabber"></div>
+    <div class="sheet-head">
+      <div><span class="sub">PREFERENCES</span><h2 id="settingsTitle">设置</h2></div>
+      <button class="icon-btn sheet-close" type="button" data-close="settingsModal" aria-label="关闭">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+    <div class="sheet-body settings-body">
+      <section class="setting-block">
+        <div class="setting-label"><span>刷新频率</span><small>交易时段自动刷新</small></div>
+        <div class="segmented" id="refreshSeg" role="group" aria-label="刷新频率">
+          <button type="button" data-refresh="5">5 秒</button>
+          <button type="button" data-refresh="10">10 秒</button>
+          <button type="button" data-refresh="30">30 秒</button>
+          <button type="button" data-refresh="60">60 秒</button>
+        </div>
+      </section>
+      <section class="setting-block">
+        <div class="setting-label"><span>外观</span><small>纸白 / 墨夜</small></div>
+        <div class="segmented" id="themeSeg" role="group" aria-label="外观">
+          <button type="button" data-theme-opt="light">纸白</button>
+          <button type="button" data-theme-opt="dark">墨夜</button>
+          <button type="button" data-theme-opt="system">跟随系统</button>
+        </div>
+      </section>
+      <section class="setting-row">
+        <div class="setting-label"><span>隐私模式</span><small>打开时隐藏所有金额</small></div>
+        <button class="switch" id="privacySwitch" type="button" role="switch" aria-checked="false"><i></i></button>
+      </section>
+      <section class="setting-row">
+        <div class="setting-label"><span>安装到手机</span><small id="installHint">像 App 一样全屏打开</small></div>
+        <button class="btn tiny" id="installBtn" type="button">安装</button>
+      </section>
+      <section class="setting-block">
+        <div class="setting-label"><span>数据备份</span><small>换手机或清缓存前先导出</small></div>
+        <div class="setting-actions">
+          <button class="btn ghost" id="exportBtn" type="button">导出 JSON</button>
+          <button class="btn ghost" id="importBtn" type="button">导入备份</button>
+        </div>
+      </section>
+      <section class="setting-block">
+        <button class="setting-link" id="aboutBtn" type="button"><span>行情与数据说明</span><span>→</span></button>
+        <button class="setting-link danger" id="clearBtn" type="button"><span>清空账本</span><span>→</span></button>
+      </section>
+      <p class="settings-foot">私账 v1.0 · 数据仅存本机<br>行情来自腾讯证券公开接口</p>
+    </div>
+  </div>
+</div>
+
+<!-- 说明 -->
+<div class="modal" id="infoModal" aria-hidden="true">
+  <div class="sheet sheet-compact" role="dialog" aria-modal="true" aria-labelledby="infoTitle">
+    <div class="sheet-grabber"></div>
+    <div class="sheet-head">
+      <div><span class="sub">ABOUT DATA</span><h2 id="infoTitle">行情与数据说明</h2></div>
+      <button class="icon-btn sheet-close" type="button" data-close="infoModal" aria-label="关闭">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+    <div class="sheet-body info-body">
+      <div class="info-item"><b>股票 / 场内 ETF</b><p>腾讯证券公开行情接口，交易时段约 5–10 秒延迟。休市时显示最近一个交易日的收盘数据。</p></div>
+      <div class="info-item"><b>场外基金</b><p>按基金公司最新公布的净值计算，每个交易日更新一次。监管已停止公开实时估值，所以基金部分不会在盘中跳动，净值日期会标在持仓里。</p></div>
+      <div class="info-item"><b>你的数据</b><p>全部保存在手机浏览器的 localStorage 中，不上传服务器、不做统计。清除浏览器数据会丢失，建议定期导出备份。</p></div>
+      <div class="info-item"><b>风险提示</b><p>本应用仅用于个人资产记账，不构成任何投资建议。行情可能存在延迟或错误，请以券商 / 基金公司为准。</p></div>
+    </div>
+  </div>
+</div>
+
+<!-- 首次引导 -->
+<div class="onboarding" id="onboarding" hidden>
+  <div class="onb-frame">
+    <span class="onb-watermark" aria-hidden="true">账</span>
+    <header class="onb-top">
+      <span class="brand">
+        <span class="brand-seal" aria-hidden="true">账</span>
+        <span class="brand-text"><strong>私账</strong><small>PRIVATE LEDGER</small></span>
+      </span>
+      <span class="onb-index">NO. 001</span>
+    </header>
+    <div class="onb-main">
+      <span class="eyebrow">A PRIVATE LEDGER</span>
+      <h1>把散落的资产，<br><em>收进一本账。</em></h1>
+      <p class="onb-lead">股票、基金、现金，一处看清。<br>行情自动更新，数据只留在你的手机。</p>
+      <div class="onb-chips">
+        <span><b>01</b> 股票 / ETF</span>
+        <span><b>02</b> 场外基金</span>
+        <span><b>03</b> 现金 / 存款</span>
+      </div>
+      <div class="onb-actions">
+        <button class="btn primary" id="startBtn" type="button">建立我的账本</button>
+        <button class="btn ghost" id="demoBtn" type="button">先看看示例</button>
+      </div>
+      <p class="onb-privacy">不注册 · 不上传 · 只存本机</p>
+    </div>
+    <footer class="onb-foot">
+      <span>数据仅存本机</span>
+      <span>PRIVATE · LOCAL · 2026</span>
+    </footer>
+    <span class="onb-seal" aria-hidden="true">私账</span>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<input type="file" id="importFile" accept="application/json,.json" hidden>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>
