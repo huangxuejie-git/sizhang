@@ -2358,8 +2358,9 @@ function normalizeAIFloat(value) {
 
 function normalizeAICode(value) {
   const digits = String(value ?? '').replace(/\D/g, '');
-  if (digits.length < 6) return '';
-  return digits.slice(-6);
+  if (digits.length >= 6) return digits.slice(-6);
+  if (digits.length > 0) return digits.padStart(6, '0');
+  return '';
 }
 
 function normalizeAIKind(value, name = '', code = '') {
@@ -2696,28 +2697,30 @@ async function callZhipuVision(dataUrl, parentSignal) {
   }
 
   try {
+    const body = {
+      model: state.aiConfig.model,
+      messages: [
+        { role: 'system', content: '你是严谨的资产截图结构化助手，只输出 JSON。' },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: AI_PROMPT },
+            { type: 'image_url', image_url: { url: dataUrl } },
+          ],
+        },
+      ],
+      temperature: 0.1,
+      max_tokens: 4096,
+      stream: false,
+    };
+
     const response = await fetch(AI_ENDPOINT, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
         authorization: 'Bearer ' + state.aiConfig.apiKey,
       },
-      body: JSON.stringify({
-        model: state.aiConfig.model,
-        messages: [
-          { role: 'system', content: '你是严谨的资产截图结构化助手，只输出 JSON。' },
-          {
-            role: 'user',
-            content: [
-              { type: 'text', text: AI_PROMPT },
-              { type: 'image_url', image_url: { url: dataUrl } },
-            ],
-          },
-        ],
-        temperature: 0.1,
-        max_tokens: 4096,
-        stream: false,
-      }),
+      body: JSON.stringify(body),
       signal: controller.signal,
     });
 
