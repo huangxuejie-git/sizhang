@@ -771,7 +771,7 @@ function scheduleNext() {
   if (document.hidden) return;
   const interval = isTradingNow()
     ? state.settings.refresh * 1000
-    : Math.max(60 * 1000, state.settings.refresh * 6000);
+    : 5 * 60 * 1000;
   state.refreshTimer = setTimeout(() => refreshAll(false), interval);
 }
 
@@ -1508,6 +1508,9 @@ function closeModal(id) {
 function openEditor() {
   renderEditor();
   openModal('editorModal');
+  requestAnimationFrame(() => {
+    el.editorBody.scrollTop = 0;
+  });
 }
 
 function openAddChooser() {
@@ -1693,10 +1696,12 @@ async function triggerLookup(code) {
       return;
     }
     el.lookupCard.classList.add('bad');
-    el.lookupName.textContent = err.message === 'money-fund' ? '暂不支持货币基金' : '未查到该代码';
-    el.lookupMeta.textContent = err.message === 'money-fund'
-      ? '请按「现金 / 存款」录入'
-      : '请检查代码，或稍后再试';
+    el.lookupName.textContent = state.form.kind === 'fund'
+      ? '未查到该基金'
+      : (err.message === 'money-fund' ? '暂不支持货币基金' : '未查到该代码');
+    el.lookupMeta.textContent = state.form.kind === 'fund'
+      ? '请检查代码；货币基金请按「现金」录入'
+      : (err.message === 'money-fund' ? '请按「现金 / 存款」录入' : '请检查代码，或稍后再试');
     state.form.quote = null;
     state.form.quoteCode = '';
   }
@@ -2263,6 +2268,7 @@ function bindEvents() {
   });
   el.editorBody.addEventListener('keydown', (event) => {
     if (event.key !== 'Enter' && event.key !== ' ') return;
+    if (event.target.closest('.er-del')) return;
     const row = event.target.closest('.edit-row');
     if (!row) return;
     event.preventDefault();
@@ -2327,6 +2333,9 @@ function bindEvents() {
   el.chartWrap.addEventListener('pointerdown', handleChartPointer);
   el.chartWrap.addEventListener('pointerleave', hideChartTip);
   el.chartWrap.addEventListener('pointercancel', hideChartTip);
+  el.chartWrap.addEventListener('pointerup', () => {
+    setTimeout(hideChartTip, 1600);
+  });
 
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {

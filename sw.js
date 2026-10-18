@@ -1,5 +1,5 @@
 /* 私账 service worker — app shell offline cache */
-const CACHE = 'sizhang-v1.0.0';
+const CACHE = 'sizhang-v1.0.1';
 const ASSETS = [
   './',
   './index.html',
