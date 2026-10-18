@@ -15,6 +15,7 @@ const LS = {
   quotes: 'sz.quotes.v1',
   minute: 'sz.minute.v1',
   onboarded: 'sz.onboarded.v1',
+  ai: 'sz.ai.v1',
 };
 
 const DEFAULT_SETTINGS = {
@@ -25,6 +26,37 @@ const DEFAULT_SETTINGS = {
 
 const QUOTE_ENDPOINT = 'https://qt.gtimg.cn/q=';
 const MINUTE_ENDPOINT = 'https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=';
+
+const AI_ENDPOINT = 'https://bigmodel.cn/api/paas/v4/chat/completions';
+const AI_DEFAULT_MODEL = 'glm-4.6v-flash';
+const AI_MODELS = [
+  { id: 'glm-4.6v-flash', label: 'GLM-4.6V-Flash · 免费', note: '推荐，免费额度' },
+  { id: 'glm-5.3-flash', label: 'GLM-5.3-Flash · 最新', note: '更新模型，可能计费' },
+  { id: 'glm-4.6v', label: 'GLM-4.6V · 更准', note: '付费，复杂截图更稳' },
+  { id: 'glm-4.6v-flashx', label: 'GLM-4.6V-FlashX · 快速', note: '付费，速度优先' },
+  { id: 'glm-4v-flash', label: 'GLM-4V-Flash · 旧版免费', note: '兼容旧 Key' },
+  { id: 'glm-4v-plus', label: 'GLM-4V-Plus · 旧版增强', note: '付费' },
+];
+
+const AI_PROMPT = `请从这张持仓截图中提取所有资产，严格只输出一个 JSON 对象，不要输出 Markdown 代码块、解释或前后缀。
+
+截图可能来自券商持仓页、支付宝基金页或天天基金页。忽略总资产、收益汇总、按钮、广告、推荐、指数行情等非持仓内容。
+
+输出格式：
+{"items":[{"kind":"stock|fund|cash","code":"6位数字或空字符串","name":"资产名称","qty":数字或null,"cost":数字或null,"marketValue":数字或null,"profit":数字或null,"confidence":0到1}],"warnings":["需要提醒用户的事项"]}
+
+规则：
+1. 股票、场内 ETF、LOF 的 kind 为 stock；场外基金、ETF 联接基金的 kind 为 fund；余额宝、现金、活期的 kind 为 cash。
+2. code 只填截图中明确出现的 6 位数字代码；没有就填空字符串，不要猜。
+3. qty：股票是持仓股数，基金是持有份额；如果同一行还有“可用数量 / 可用份额 / 冻结”，取“持仓数量 / 持有份额”，不要取可用数量；如果截图只有金额没有份额，qty 填 null。
+4. cost：股票取每股持仓成本（摊薄成本），基金取每份成本净值；不要取现价；没有就填 null。
+5. profit：该资产的累计持有收益（不是昨日收益、今日收益）；没有就填 null。
+6. marketValue：这一行的持仓市值 / 持有金额，单位元；没有就填 null。
+7. 数字去掉 ￥、¥、逗号、加号和百分号；“1.2万”写成 12000，“3.5亿”写成 350000000。
+8. 不要输出合计行、总资产行、收益汇总行；同一只资产只输出一次。
+9. 不确定的字段填 null，并在 warnings 里说明，不要编造代码、数量或成本。
+10. confidence 表示你对这一行提取准确度的估计，0 到 1。`;
+
 
 const COLORS = {
   stock: 'var(--ink)',
@@ -51,6 +83,21 @@ const state = {
   preview: '',
   deferredPrompt: null,
   form: null,
+  aiConfig: { apiKey: '', model: AI_DEFAULT_MODEL },
+  ai: {
+    step: 'upload',
+    files: [],
+    results: [],
+    warnings: [],
+    error: '',
+    busy: false,
+    progress: '',
+    progressPct: 0,
+    mode: 'merge',
+    abort: null,
+    runId: 0,
+    editingKey: false,
+  },
   refreshTimer: null,
   toastTimer: null,
   amountRAF: 0,
@@ -120,6 +167,11 @@ const el = {
   editorBody: document.getElementById('editorBody'),
   editorBatchBtn: document.getElementById('editorBatchBtn'),
   editorExportBtn: document.getElementById('editorExportBtn'),
+  editorAIBtn: document.getElementById('editorAIBtn'),
+  aiBody: document.getElementById('aiBody'),
+  aiFoot: document.getElementById('aiFoot'),
+  aiSettingHint: document.getElementById('aiSettingHint'),
+  aiSettingBtn: document.getElementById('aiSettingBtn'),
   formTitle: document.getElementById('formTitle'),
   formKicker: document.getElementById('formKicker'),
   formFields: document.getElementById('formFields'),
@@ -420,6 +472,14 @@ function loadState() {
 
   const minute = readLS(LS.minute, {});
   if (minute && typeof minute === 'object') state.minute = minute;
+
+  const ai = readLS(LS.ai, null);
+  if (ai && typeof ai === 'object') {
+    state.aiConfig = {
+      apiKey: typeof ai.apiKey === 'string' ? ai.apiKey : '',
+      model: AI_MODELS.some((item) => item.id === ai.model) ? ai.model : AI_DEFAULT_MODEL,
+    };
+  }
 
   const quotes = readLS(LS.quotes, null);
   if (quotes && quotes.quotes && typeof quotes.quotes === 'object') {
@@ -1502,6 +1562,14 @@ function closeModal(id) {
   if (id === 'formModal' && state.form?.lookupTimer) {
     clearTimeout(state.form.lookupTimer);
   }
+  if (id === 'aiModal') {
+    state.ai.runId += 1;
+    state.ai.cancelled = true;
+    if (state.ai.abort) state.ai.abort.abort();
+    releaseAIFiles();
+    resetAIFlow();
+    state.ai.cancelled = true;
+  }
   setTimeout(syncBodyLock, 20);
 }
 
@@ -1947,6 +2015,1075 @@ async function handleBatchImport() {
   }
 }
 
+/* ------------------------------ AI screenshot import ------------------------------ */
+
+let aiSearchSeq = 0;
+const aiSearchCache = new Map();
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function aiKeyConfigured() {
+  return Boolean(state.aiConfig.apiKey);
+}
+
+function updateAISettingHint() {
+  if (!el.aiSettingHint) return;
+  el.aiSettingHint.textContent = aiKeyConfigured()
+    ? `已配置 · ${state.aiConfig.model}`
+    : '智谱 GLM-4V · 未配置 Key';
+}
+
+function saveAIConfig() {
+  writeLS(LS.ai, state.aiConfig);
+  updateAISettingHint();
+}
+
+function releaseAIFiles() {
+  state.ai.files.forEach((file) => {
+    try { URL.revokeObjectURL(file.url); } catch (err) { /* ignore */ }
+  });
+  state.ai.files = [];
+}
+
+function resetAIFlow() {
+  state.ai.step = 'upload';
+  state.ai.results = [];
+  state.ai.warnings = [];
+  state.ai.error = '';
+  state.ai.busy = false;
+  state.ai.progress = '';
+  state.ai.progressPct = 0;
+  state.ai.abort = null;
+  state.ai.cancelled = false;
+}
+
+function openAIImport() {
+  if (state.ai.abort) state.ai.abort.abort();
+  state.ai.runId += 1;
+  releaseAIFiles();
+  resetAIFlow();
+  state.ai.mode = 'merge';
+  state.ai.editingKey = false;
+  renderAIModal();
+  openModal('aiModal');
+  setTimeout(() => {
+    if (!aiKeyConfigured()) document.getElementById('aiKeyInput')?.focus({ preventScroll: true });
+  }, 350);
+}
+
+function aiUploadHTML() {
+  const thumbs = state.ai.files.map((file, index) => `<div class="ai-thumb">
+    <img src="${file.url}" alt="持仓截图 ${index + 1}">
+    <span class="ai-thumb-index">${index + 1}</span>
+    <button type="button" class="ai-thumb-del" data-ai-action="remove" data-ai-id="${escapeHTML(file.id)}" aria-label="移除截图">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+  </div>`).join('');
+
+  const configured = aiKeyConfigured();
+  const showKeyForm = !configured || state.ai.editingKey;
+  const keyStatus = configured
+    ? '<span class="ai-status ok">已配置</span>'
+    : '<span class="ai-status">未配置</span>';
+  const modelOptions = AI_MODELS.map((item) => `<option value="${item.id}" ${item.id === state.aiConfig.model ? 'selected' : ''}>${escapeHTML(item.label)}</option>`).join('');
+  const currentModel = AI_MODELS.find((item) => item.id === state.aiConfig.model) || AI_MODELS[0];
+  const error = state.ai.error ? `<div class="form-error">${escapeHTML(state.ai.error)}</div>` : '';
+
+  const keyBlock = showKeyForm ? `<div class="ai-config-card">
+    <div class="ai-config-head"><span>智谱 GLM-4V</span>${keyStatus}</div>
+    <div class="field">
+      <label for="aiKeyInput"><span>API Key</span><a class="ai-link" href="https://bigmodel.cn/usercenter/proj-mgmt/apikeys" target="_blank" rel="noopener">获取 Key →</a></label>
+      <div class="input-wrap"><input id="aiKeyInput" type="password" autocomplete="off" spellcheck="false" placeholder="${configured ? '已保存，留空不修改' : '粘贴智谱 API Key'}"></div>
+    </div>
+    <div class="field">
+      <label for="aiModelSelect"><span>识别模型</span><small>${escapeHTML(currentModel.note)}</small></label>
+      <select class="ai-select" id="aiModelSelect">${modelOptions}</select>
+    </div>
+    <div class="ai-key-actions">
+      <button class="btn tiny ghost" type="button" data-ai-action="save-config">保存配置</button>
+      ${configured ? '<button class="ai-clear" type="button" data-ai-action="clear-key">清除 Key</button>' : ''}
+    </div>
+    <p class="ai-note">Key 只保存在本机浏览器，不上传；截图会发送给智谱，不经过其他服务器。识别可能有误，务必核对后再导入。</p>
+    ${error}
+  </div>` : `<div class="ai-key-mini">
+    <span class="ai-status ok">已配置</span>
+    <span>智谱 · ${escapeHTML(currentModel.label)}</span>
+    <button type="button" data-ai-action="edit-key">更换</button>
+  </div>${error}`;
+
+  return `<div class="ai-intro">
+    <p>上传券商或基金 App 的持仓截图，AI 会提取名称、代码、数量和成本。识别后先核对，再导入账本。</p>
+    <span class="ai-privacy">截图只发送给智谱 · 识别结果先校对</span>
+  </div>
+  ${keyBlock}
+  <div class="ai-drop" id="aiDrop">
+    <input type="file" id="aiFileInput" accept="image/png,image/jpeg,image/webp" multiple hidden>
+    <span class="ai-drop-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8V5.5A1.5 1.5 0 0 1 5.5 4H8M16 4h2.5A1.5 1.5 0 0 1 20 5.5V8M20 16v2.5a1.5 1.5 0 0 1-1.5 1.5H16M8 20H5.5A1.5 1.5 0 0 1 4 18.5V16"/><path d="M9 12h6M12 9v6"/></svg></span>
+    <b>点此选择持仓截图</b>
+    <small>支持 JPG / PNG / WEBP，最多 6 张</small>
+    <button class="btn small ghost" type="button" data-ai-action="pick">选择图片</button>
+  </div>
+  ${thumbs ? `<div class="ai-thumbs">${thumbs}</div>` : ''}`;
+}
+
+function renderAIModal() {
+  if (state.ai.cancelled) return;
+  if (state.ai.step === 'recognizing') {
+    el.aiBody.innerHTML = `<div class="ai-progress">
+      <div class="ai-spinner"></div>
+      <h3>正在识别持仓</h3>
+      <p>${escapeHTML(state.ai.progress || '准备中…')}</p>
+      <div class="ai-progress-bar"><i style="width:${clamp(state.ai.progressPct, 0, 100)}%"></i></div>
+    </div>`;
+    el.aiFoot.innerHTML = '<button class="btn ghost" type="button" data-ai-action="cancel">取消</button>';
+    return;
+  }
+
+  if (state.ai.step === 'error') {
+    el.aiBody.innerHTML = `<div class="ai-error-card">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v5M12 16.5v.1"/><path d="M10.3 4.6 2.8 18a1.5 1.5 0 0 0 1.3 2.2h15.8a1.5 1.5 0 0 0 1.3-2.2L13.7 4.6a1.5 1.5 0 0 0-2.6 0Z"/></svg>
+      <h3>识别没有完成</h3>
+      <p>${escapeHTML(state.ai.error || '请稍后重试。')}</p>
+    </div>`;
+    el.aiFoot.innerHTML = `<button class="btn ghost" type="button" data-ai-action="back">返回</button>
+      <button class="btn primary grow" type="button" data-ai-action="retry">重试</button>`;
+    return;
+  }
+
+  if (state.ai.step === 'review') {
+    renderAIReview();
+    return;
+  }
+
+  el.aiBody.innerHTML = aiUploadHTML();
+  el.aiFoot.innerHTML = `<button class="btn ghost" type="button" data-ai-action="cancel">取消</button>
+    <button class="btn primary grow" type="button" data-ai-action="start" ${state.ai.files.length ? '' : 'disabled'}>开始识别${state.ai.files.length ? `（${state.ai.files.length} 张）` : ''}</button>`;
+}
+
+function aiItemStatusText(item) {
+  if (item.status === 'ready') return '可导入';
+  return item.error || '待补全';
+}
+
+function aiRowHTML(item) {
+  const kindLabel = item.kind === 'cash' ? '现金' : item.kind === 'fund' ? '基金' : '股票';
+  const kindOptions = [
+    ['stock', '股票 / ETF'],
+    ['fund', '场外基金'],
+    ['cash', '现金'],
+  ].map(([value, label]) => `<option value="${value}" ${item.kind === value ? 'selected' : ''}>${label}</option>`).join('');
+  const confidence = Math.round((Number(item.confidence) || 0) * 100);
+  const selected = Boolean(item.selected);
+  const isCash = item.kind === 'cash';
+  const fields = isCash
+    ? `<div class="ai-row-fields">
+        <label>金额（元）<input data-field="marketValue" inputmode="decimal" value="${escapeHTML(item.marketValue ?? '')}" placeholder="0.00"></label>
+        <label>识别置信度<input value="${confidence}%" readonly></label>
+      </div>`
+    : `<div class="ai-row-fields">
+        <label>代码<input data-field="code" inputmode="numeric" maxlength="6" value="${escapeHTML(item.code || '')}" placeholder="6 位代码"></label>
+        <label>数量<input data-field="qty" inputmode="decimal" value="${escapeHTML(item.qty ?? '')}" placeholder="股 / 份"></label>
+        <label>成本<input data-field="cost" inputmode="decimal" value="${escapeHTML(item.cost ?? '')}" placeholder="元"></label>
+        <label>市值<input data-field="marketValue" inputmode="decimal" value="${escapeHTML(item.marketValue ?? '')}" placeholder="元"></label>
+      </div>`;
+
+  return `<div class="ai-row ${selected ? 'selected' : ''} ${item.status === 'ready' ? '' : 'needs'}" data-row-id="${escapeHTML(item.id)}">
+    <div class="ai-row-head">
+      <button class="ai-check ${selected ? 'on' : ''}" type="button" data-ai-toggle aria-label="${selected ? '取消选择' : '选择'}">✓</button>
+      <select class="ai-kind" data-field="kind">${kindOptions}</select>
+      <input class="ai-name" data-field="name" value="${escapeHTML(item.name || '')}" placeholder="名称" aria-label="资产名称">
+      <span class="ai-conf ${confidence >= 80 ? '' : 'low'}">${confidence}%</span>
+    </div>
+    ${fields}
+    <div class="ai-row-status ${item.status === 'ready' ? 'ready' : 'needs'}">${escapeHTML(aiItemStatusText(item))}</div>
+  </div>`;
+}
+
+function updateAIImportButton() {
+  const button = el.aiFoot.querySelector('[data-ai-action="import"]');
+  if (!button) return;
+  const selected = state.ai.results.filter((item) => item.selected && item.status === 'ready').length;
+  button.textContent = `导入 ${selected} 项`;
+  button.disabled = selected === 0;
+}
+
+function renderAIReview() {
+  const results = state.ai.results;  results.forEach((item) => evaluateAIItem(item));
+  const ready = results.filter((item) => item.status === 'ready').length;
+  const selected = results.filter((item) => item.selected && item.status === 'ready').length;
+  const warnings = state.ai.warnings;
+
+  if (!results.length) {
+    el.aiBody.innerHTML = `<div class="ai-empty">没有识别到持仓。<br>换一张更清晰、包含代码或名称的截图试试。</div>`;
+    el.aiFoot.innerHTML = `<button class="btn ghost" type="button" data-ai-action="back">返回</button>`;
+    return;
+  }
+
+  el.aiBody.innerHTML = `<div class="ai-review-head">
+    <div><b>识别到 ${results.length} 项</b><small>${ready} 项可导入 · ${results.length - ready} 项待补全</small></div>
+    <div class="ai-head-actions">
+      <button type="button" data-ai-action="select-ready">全选可导入</button>
+      <button type="button" data-ai-action="add-row">＋ 手动</button>
+    </div>
+  </div>
+  <div class="ai-mode">
+    <span>导入方式</span>
+    <div class="segmented mini" role="group" aria-label="AI 导入方式">
+      <button type="button" data-ai-mode="merge" class="${state.ai.mode === 'merge' ? 'active' : ''}">合并同代码</button>
+      <button type="button" data-ai-mode="replace" class="${state.ai.mode === 'replace' ? 'active' : ''}">清空后导入</button>
+    </div>
+  </div>
+  ${state.ai.error ? `<div class="form-error">${escapeHTML(state.ai.error)}</div>` : ''}
+  <div class="ai-rows">${results.map(aiRowHTML).join('')}</div>
+  ${warnings.length ? `<div class="ai-warnings"><b>需要留意</b>${warnings.slice(0, 8).map((warning) => `<p>· ${escapeHTML(warning)}</p>`).join('')}</div>` : ''}`;
+
+  el.aiFoot.innerHTML = `<button class="btn ghost" type="button" data-ai-action="back">返回</button>
+    <button class="btn primary grow" type="button" data-ai-action="import" ${selected ? '' : 'disabled'}>导入 ${selected} 项</button>`;
+}
+
+function rerenderAIKeepScroll() {
+  const top = el.aiBody.scrollTop;
+  renderAIModal();
+  el.aiBody.scrollTop = top;
+}
+
+function addAIFiles(fileList) {
+  const incoming = Array.from(fileList || []).filter((file) => file.type.startsWith('image/') || /\.(png|jpe?g|webp|heic)$/i.test(file.name || ''));  if (!incoming.length) {
+    toast('请选择图片文件');
+    return;
+  }
+  const remaining = 6 - state.ai.files.length;
+  if (remaining <= 0) {
+    toast('最多识别 6 张截图');
+    return;
+  }
+  incoming.slice(0, remaining).forEach((file) => {
+    if (file.size > 20 * 1024 * 1024) {
+      toast(`${file.name} 超过 20MB，已跳过`);
+      return;
+    }
+    state.ai.files.push({
+      id: uid(),
+      file,
+      url: URL.createObjectURL(file),
+    });
+  });
+  state.ai.error = '';
+  renderAIModal();
+}
+
+function removeAIFile(id) {
+  const index = state.ai.files.findIndex((file) => file.id === id);
+  if (index < 0) return;
+  try { URL.revokeObjectURL(state.ai.files[index].url); } catch (err) { /* ignore */ }
+  state.ai.files.splice(index, 1);
+  renderAIModal();
+}
+
+function saveAIConfigFromForm(showToast = true) {
+  const keyInput = document.getElementById('aiKeyInput');
+  const modelSelect = document.getElementById('aiModelSelect');
+  if (keyInput) {
+    const key = keyInput.value.trim().replace(/^Bearer\s+/i, '');
+    if (key) state.aiConfig.apiKey = key;
+  }
+  if (modelSelect) state.aiConfig.model = modelSelect.value;
+  if (!state.aiConfig.apiKey) {
+    state.ai.error = '请先填写智谱 API Key。';
+    renderAIModal();
+    return false;
+  }
+  saveAIConfig();
+  state.ai.editingKey = false;
+  state.ai.error = '';
+  if (showToast) {
+    toast('AI 配置已保存');
+    renderAIModal();
+  }
+  return true;
+}
+
+function prepareAIImage(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => {
+      try {
+        const maxSide = 2000;
+        const scale = Math.min(1, maxSide / Math.max(image.naturalWidth || 1, image.naturalHeight || 1));
+        const width = Math.max(1, Math.round((image.naturalWidth || 1) * scale));
+        const height = Math.max(1, Math.round((image.naturalHeight || 1) * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, width, height);
+        ctx.drawImage(image, 0, 0, width, height);
+        resolve(canvas.toDataURL('image/jpeg', 0.86));
+      } catch (err) {
+        reject(new Error('图片处理失败，请换一张截图。'));
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('图片无法读取，请换成 JPG / PNG 截图。'));
+    };
+    image.decoding = 'async';
+    image.src = url;
+  });
+}
+
+function normalizeAIFloat(value) {
+  if (value === null || value === undefined || value === '') return null;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  let text = String(value).trim().replace(/[−–]/g, '-').replace(/,/g, '').replace(/[￥¥+\s]/g, '').replace(/[份股]/g, '');
+  let multiplier = 1;
+  if (/万元?$/.test(text)) {
+    multiplier = 10000;
+    text = text.replace(/万元?$/, '');
+  } else if (/亿元?$/.test(text)) {
+    multiplier = 100000000;
+    text = text.replace(/亿元?$/, '');
+  }
+  const negative = /^\(.*\)$/.test(text);
+  const number = parseFloat(text.replace(/[^\d.-]/g, ''));
+  if (!Number.isFinite(number)) return null;
+  return (negative ? -number : number) * multiplier;
+}
+
+function normalizeAICode(value) {
+  const digits = String(value ?? '').replace(/\D/g, '');
+  if (digits.length < 6) return '';
+  return digits.slice(-6);
+}
+
+function normalizeAIKind(value, name = '', code = '') {
+  const text = String(value ?? '').toLowerCase();
+  if (/(cash|现金|活期|余额宝|货币)/.test(text)) return 'cash';
+  if (/(fund|基金|场外|otc|联接)/.test(text)) return 'fund';
+  if (/(stock|股票|a股|etf|lof|场内)/.test(text)) return 'stock';
+  if (/余额宝|货币/.test(name)) return 'cash';
+  if (/基金|联接/.test(name)) return 'fund';
+  if (/^[15]/.test(code)) return 'stock';
+  return 'stock';
+}
+
+function normalizeAIName(value) {
+  return String(value || '').replace(/[\s·（）()\-—]/g, '').toLowerCase();
+}
+
+function normalizeAIItems(payload, sourceIndex) {
+  const rawItems = Array.isArray(payload) ? payload : payload?.items;
+  if (!Array.isArray(rawItems)) {
+    throw new Error('AI 没有返回可识别的持仓列表，请重试或换用更清晰的截图。');
+  }
+  const items = [];
+  rawItems.forEach((raw) => {
+    if (!raw || typeof raw !== 'object') return;
+    const name = String(raw.name || raw.securityName || raw.fundName || '').trim();
+    const code = normalizeAICode(raw.code || raw.securityCode || raw.fundCode || '');
+    if (!name && !code) return;
+    const kind = normalizeAIKind(raw.kind || raw.type, name, code);
+    const qty = normalizeAIFloat(raw.qty ?? raw.quantity ?? raw.shares ?? raw.holdQty);
+    const cost = normalizeAIFloat(raw.cost ?? raw.costPrice ?? raw.avgCost);
+    const marketValue = normalizeAIFloat(raw.marketValue ?? raw.value ?? raw.amount ?? raw.holdAmount);
+    const profit = normalizeAIFloat(raw.profit ?? raw.pnl ?? raw.gain);
+    let confidence = normalizeAIFloat(raw.confidence);
+    if (confidence === null) confidence = 0.75;
+    if (confidence > 1) confidence /= 100;
+    confidence = clamp(confidence, 0, 1);
+    items.push({
+      id: uid(),
+      kind,
+      code,
+      name,
+      qty,
+      cost,
+      marketValue,
+      profit,
+      confidence,
+      quote: null,
+      selected: true,
+      status: '',
+      error: '',
+      source: sourceIndex,
+    });
+  });
+  return items;
+}
+
+function dedupeAIItems(items, warnings) {
+  const map = new Map();
+  items.forEach((item) => {
+    const key = item.kind === 'cash'
+      ? 'cash:' + normalizeAIName(item.name)
+      : item.code
+        ? item.kind + ':' + item.code
+        : item.kind + ':name:' + normalizeAIName(item.name);
+    if (!map.has(key)) {
+      map.set(key, item);
+      return;
+    }
+    const existing = map.get(key);
+    ['qty', 'cost', 'marketValue', 'profit', 'name', 'code'].forEach((field) => {
+      if ((existing[field] === null || existing[field] === undefined || existing[field] === '') && item[field]) {
+        existing[field] = item[field];
+      }
+    });
+    existing.confidence = Math.max(existing.confidence, item.confidence);
+    warnings.push(`「${existing.name || existing.code}」在多张截图中重复出现，已合并。`);
+  });
+
+  const byName = new Map();
+  Array.from(map.values()).forEach((item) => {
+    if (!item.name) {
+      byName.set('id:' + item.id, item);
+      return;
+    }
+    const key = item.kind + ':name:' + normalizeAIName(item.name);
+    const existing = byName.get(key);
+    if (!existing) {
+      byName.set(key, item);
+      return;
+    }
+    if (existing.code && item.code && existing.code !== item.code) {
+      byName.set(key + ':' + item.code, item);
+      return;
+    }
+    ['qty', 'cost', 'marketValue', 'profit', 'code'].forEach((field) => {
+      if ((existing[field] === null || existing[field] === undefined || existing[field] === '') && item[field]) {
+        existing[field] = item[field];
+      }
+    });
+    existing.confidence = Math.max(existing.confidence, item.confidence);
+    warnings.push(`「${item.name}」名称相同，已合并重复项。`);
+  });
+
+  return Array.from(byName.values());
+}
+
+function jsonpRequest(url, timeout = 8000) {
+  return new Promise((resolve, reject) => {
+    const callback = '__sz_ai_' + (++aiSearchSeq) + '_' + Date.now();
+    const script = document.createElement('script');
+    let settled = false;
+    const timer = setTimeout(() => cleanup(new Error('timeout')), timeout);
+    function cleanup(error, data) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { delete window[callback]; } catch (err) { window[callback] = undefined; }
+      if (script.parentNode) script.parentNode.removeChild(script);
+      if (error) reject(error);
+      else resolve(data);
+    }
+    window[callback] = (data) => cleanup(null, data);
+    script.onerror = () => cleanup(new Error('jsonp-error'));
+    script.async = true;
+    script.src = url + '&cb=' + encodeURIComponent(callback);
+    document.head.appendChild(script);
+  });
+}
+
+async function searchSecurityByName(name, kind) {
+  const cleanName = String(name || '').trim();
+  if (!cleanName) return null;
+  const cacheKey = kind + ':' + normalizeAIName(cleanName);
+  if (aiSearchCache.has(cacheKey)) return aiSearchCache.get(cacheKey);
+
+  const url = 'https://searchapi.eastmoney.com/api/suggest/get?input=' + encodeURIComponent(cleanName)
+    + '&type=14&token=D43BF722C8E33BDC906FB84D85E326E8&count=10';
+  try {
+    const data = await jsonpRequest(url);
+    const list = data?.QuotationCodeTable?.Data;
+    if (!Array.isArray(list)) {
+      aiSearchCache.set(cacheKey, null);
+      return null;
+    }
+    const pool = list.filter((item) => /^\d{6}$/.test(String(item.Code || '')));
+    let candidates;
+    if (kind === 'fund') {
+      candidates = pool.filter((item) => item.Classify === 'OTCFUND');
+    } else {
+      candidates = pool.filter((item) => item.Classify === 'AStock');
+      if (!candidates.length) {
+        candidates = pool.filter((item) => /^(5|1[5-8])/.test(String(item.Code || '')) && (item.Classify === 'Fund' || /ETF|LOF/.test(String(item.SecurityTypeName || ''))));
+      }
+    }
+    const exact = candidates.find((item) => normalizeAIName(item.Name) === normalizeAIName(cleanName));
+    const result = exact || candidates[0] || null;
+    aiSearchCache.set(cacheKey, result);
+    return result;
+  } catch (err) {
+    aiSearchCache.set(cacheKey, null);
+    return null;
+  }
+}
+
+async function resolveAIItems(items) {
+  const warnings = [];
+  for (const item of items) {
+    if (item.kind === 'cash' || item.code || !item.name) continue;
+    const found = await searchSecurityByName(item.name, item.kind);
+    if (found) {
+      item.code = normalizeAICode(found.Code);
+      if (!item.name) item.name = found.Name;
+      warnings.push(`按名称匹配「${item.name}」为 ${item.code}，请核对。`);
+    } else {
+      warnings.push(`未能自动匹配「${item.name}」的代码，请手动补充。`);
+    }
+  }
+
+  const ids = Array.from(new Set(items
+    .filter((item) => item.kind !== 'cash' && item.code)
+    .map((item) => (item.kind === 'fund' ? fundId(item.code) : stockId(item.code)))));
+  const quotes = ids.length ? await fetchTencent(ids) : {};
+
+  items.forEach((item) => {
+    if (item.kind === 'cash') {
+      if (!item.marketValue && item.qty) item.marketValue = item.qty;
+      evaluateAIItem(item);
+      return;
+    }
+
+    if (!item.code) {
+      item.status = 'needs';
+      item.error = '缺少 6 位代码';
+      item.selected = false;
+      return;
+    }
+
+    const quote = quotes[qkey(item.kind, item.code)];
+    if (!quote) {
+      item.status = 'needs';
+      item.error = '未查到该代码的行情，请核对';
+      item.selected = false;
+      return;
+    }
+
+    item.quote = quote;
+    if (!item.name) item.name = quote.name;
+    if (item.name && quote.name && normalizeAIName(item.name) !== normalizeAIName(quote.name)) {
+      warnings.push(`代码 ${item.code} 对应「${quote.name}」，与截图名称「${item.name}」不一致，请核对。`);
+    }
+    if (!(normalizeAIFloat(item.qty) > 0) && normalizeAIFloat(item.marketValue) > 0) {
+      item.qty = Number((normalizeAIFloat(item.marketValue) / quote.price).toFixed(2));
+    }
+    if (normalizeAIFloat(item.qty) > 0 && !(normalizeAIFloat(item.marketValue) > 0)) {
+      item.marketValue = Number((normalizeAIFloat(item.qty) * quote.price).toFixed(2));
+    }
+    if (!(normalizeAIFloat(item.cost) > 0) && normalizeAIFloat(item.profit) !== null && normalizeAIFloat(item.qty) > 0) {
+      const derivedCost = (normalizeAIFloat(item.marketValue) - normalizeAIFloat(item.profit)) / normalizeAIFloat(item.qty);
+      if (derivedCost > 0) item.cost = Number(derivedCost.toFixed(4));
+    }
+    evaluateAIItem(item);
+    if (item.status !== 'ready') item.selected = false;
+  });
+
+  return warnings;
+}
+
+function evaluateAIItem(item) {
+  item.qty = normalizeAIFloat(item.qty);
+  item.cost = normalizeAIFloat(item.cost);
+  item.marketValue = normalizeAIFloat(item.marketValue);
+  if (item.kind === 'cash') {
+    const amount = normalizeAIFloat(item.marketValue ?? item.qty);
+    item.marketValue = amount;
+    if (!item.name) {
+      item.status = 'needs';
+      item.error = '缺少名称';
+    } else if (!(amount > 0)) {
+      item.status = 'needs';
+      item.error = '缺少金额';
+    } else {
+      item.status = 'ready';
+      item.error = '';
+    }
+    return;
+  }
+  if (!item.code || item.code.length !== 6) {
+    item.status = 'needs';
+    item.error = '缺少 6 位代码';
+  } else if (!(item.qty > 0)) {
+    item.status = 'needs';
+    item.error = '缺少数量或市值';
+  } else if (item.cost !== null && item.cost < 0) {
+    item.status = 'needs';
+    item.error = '成本不能为负数';
+  } else {
+    item.status = 'ready';
+    item.error = '';
+  }
+}
+
+function extractAIContent(json) {
+  const message = json?.choices?.[0]?.message;
+  let content = message?.content ?? '';
+  if (Array.isArray(content)) {
+    content = content.map((part) => (typeof part === 'string' ? part : part?.text || '')).join('');
+  }
+  if (!content && message?.reasoning_content) content = message.reasoning_content;
+  return String(content || '');
+}
+
+function parseAIJSON(content) {
+  let text = String(content || '').trim();
+  text = text.replace(/<\|[^>]*\|>/g, '');
+  text = text.replace(/[“”]/g, '"');
+  text = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
+  const objectStart = text.indexOf('{');
+  const objectEnd = text.lastIndexOf('}');
+  if (objectStart >= 0 && objectEnd > objectStart) {
+    text = text.slice(objectStart, objectEnd + 1);
+  } else {
+    const arrayStart = text.indexOf('[');
+    const arrayEnd = text.lastIndexOf(']');
+    if (arrayStart >= 0 && arrayEnd > arrayStart) text = text.slice(arrayStart, arrayEnd + 1);
+  }
+  try {
+    return JSON.parse(text.replace(/,\s*([}\]])/g, '$1'));
+  } catch (err) {
+    throw new Error('AI 返回的内容不是有效 JSON，请重试，或在设置里换用 GLM-4.6V。');
+  }
+}
+
+function zhipuErrorMessage(status, json, rawText) {
+  const message = json?.error?.message || json?.message || String(rawText || '').slice(0, 180);
+  if (status === 401 || status === 403) return 'API Key 无效或已过期，请在设置里重新填写智谱 Key。';
+  if (status === 429) return '请求太频繁或额度不足，请稍后再试。';
+  if (status === 400 && /model/i.test(message)) return '当前模型不可用，请在识别设置里换一个模型。';
+  return `识别失败（${status}）：${message || '请检查网络和 Key 后重试。'}`;
+}
+
+function mockAIExtraction() {
+  if (new URLSearchParams(location.search).get('aiMock') === 'search') {
+    return {
+      items: [
+        { kind: 'fund', name: '易方达消费行业股票', qty: 10000, cost: 2.5, marketValue: 27850, confidence: 0.9 },
+      ],
+      warnings: ['当前为演示识别结果，未调用真实模型。'],
+    };
+  }
+  return {
+    items: [
+      { kind: 'stock', code: '600519', name: '贵州茅台', qty: 100, cost: 1250, marketValue: 132900, confidence: 0.98 },
+      { kind: 'fund', code: '005827', name: '易方达蓝筹精选混合', qty: 50000, cost: 1.3, marketValue: 70810, confidence: 0.94 },
+      { kind: 'cash', name: '活期', marketValue: 186420, confidence: 0.99 },
+    ],
+    warnings: ['当前为演示识别结果，未调用真实模型。'],
+  };
+}
+
+async function callZhipuVision(dataUrl, parentSignal) {
+  const mock = new URLSearchParams(location.search).get('aiMock');
+  if (mock) {
+    await delay(650);
+    return mockAIExtraction();
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 90000);
+  const abortParent = () => controller.abort();
+  if (parentSignal) {
+    if (parentSignal.aborted) controller.abort();
+    else parentSignal.addEventListener('abort', abortParent, { once: true });
+  }
+
+  try {
+    const response = await fetch(AI_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: 'Bearer ' + state.aiConfig.apiKey,
+      },
+      body: JSON.stringify({
+        model: state.aiConfig.model,
+        messages: [
+          { role: 'system', content: '你是严谨的资产截图结构化助手，只输出 JSON。' },
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: AI_PROMPT },
+              { type: 'image_url', image_url: { url: dataUrl } },
+            ],
+          },
+        ],
+        temperature: 0.1,
+        max_tokens: 4096,
+        stream: false,
+      }),
+      signal: controller.signal,
+    });
+
+    const rawText = await response.text();
+    let json = null;
+    try { json = JSON.parse(rawText); } catch (err) { /* keep raw error text */ }
+    if (!response.ok) {
+      throw new Error(zhipuErrorMessage(response.status, json, rawText));
+    }
+    const content = extractAIContent(json);
+    return parseAIJSON(content);
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error('识别请求超时，请重试或换用更小的截图。');
+    throw err;
+  } finally {
+    clearTimeout(timer);
+    if (parentSignal) parentSignal.removeEventListener('abort', abortParent);
+  }
+}
+
+async function startAIRecognition() {
+  if (state.ai.busy) return;
+  if (!state.ai.files.length) {
+    toast('先选择持仓截图');
+    return;
+  }
+  if (!saveAIConfigFromForm(false)) {
+    if (!state.ai.error) state.ai.error = '请先填写智谱 API Key。';
+    renderAIModal();
+    toast('请先填写智谱 API Key');
+    document.getElementById('aiKeyInput')?.focus();
+    return;
+  }
+
+  state.ai.cancelled = false;
+  state.ai.busy = true;
+  state.ai.step = 'recognizing';
+  state.ai.error = '';
+  state.ai.progress = '正在压缩截图…';
+  state.ai.progressPct = 3;
+  renderAIModal();
+
+  const controller = new AbortController();
+  state.ai.abort = controller;
+  const runId = state.ai.runId;
+  const files = state.ai.files.slice();
+
+  try {
+    const prepared = [];
+    for (let index = 0; index < files.length; index += 1) {
+      if (controller.signal.aborted || runId !== state.ai.runId) throw new Error('cancelled');
+      state.ai.progress = `正在处理第 ${index + 1}/${files.length} 张截图…`;
+      state.ai.progressPct = 4 + ((index + 1) / files.length) * 16;
+      renderAIModal();
+      prepared.push(await prepareAIImage(files[index].file));
+    }
+
+    let done = 0;
+    const allItems = [];
+    const warnings = [];
+    await mapLimit(prepared, 2, async (dataUrl, index) => {
+      if (controller.signal.aborted || runId !== state.ai.runId) throw new Error('cancelled');
+      state.ai.progress = `AI 正在读取第 ${done + 1}/${prepared.length} 张截图…`;
+      renderAIModal();
+      const payload = await callZhipuVision(dataUrl, controller.signal);
+      if (controller.signal.aborted || runId !== state.ai.runId) throw new Error('cancelled');
+      allItems.push(...normalizeAIItems(payload, index + 1));
+      if (Array.isArray(payload?.warnings)) {
+        payload.warnings.forEach((warning) => {
+          if (warning) warnings.push(String(warning));
+        });
+      }
+      done += 1;
+      state.ai.progressPct = 20 + (done / prepared.length) * 62;
+      renderAIModal();
+    });
+
+    if (controller.signal.aborted || state.ai.cancelled || runId !== state.ai.runId) throw new Error('cancelled');
+    state.ai.progress = '正在匹配代码与行情…';
+    state.ai.progressPct = 88;
+    renderAIModal();
+
+    const items = dedupeAIItems(allItems, warnings);
+    if (!items.length) {
+      throw new Error('没有识别到持仓。请换一张更清晰、包含代码或名称的截图。');
+    }
+    const resolveWarnings = await resolveAIItems(items);
+    if (controller.signal.aborted || state.ai.cancelled || runId !== state.ai.runId) throw new Error('cancelled');
+
+    state.ai.results = items;
+    state.ai.warnings = Array.from(new Set([...warnings, ...resolveWarnings])).slice(0, 10);
+    state.ai.progressPct = 100;
+    state.ai.busy = false;
+    state.ai.step = 'review';
+    renderAIModal();
+  } catch (err) {
+    if (runId !== state.ai.runId || state.ai.cancelled || err.message === 'cancelled') return;
+    state.ai.busy = false;
+    state.ai.step = 'error';
+    state.ai.error = err.message || '识别失败，请检查网络后重试。';
+    renderAIModal();
+  } finally {
+    if (runId === state.ai.runId) state.ai.abort = null;
+  }
+}
+
+async function importAIResults() {
+  const selected = state.ai.results.filter((item) => item.selected && item.status === 'ready');
+  if (!selected.length) {
+    toast('先选择要导入的资产');
+    return;
+  }
+  state.ai.error = '';
+
+  const ids = Array.from(new Set(selected
+    .filter((item) => item.kind !== 'cash' && item.code)
+    .map((item) => (item.kind === 'fund' ? fundId(item.code) : stockId(item.code)))));
+  let quotes = {};
+  try {
+    quotes = ids.length ? await fetchTencent(ids) : {};
+  } catch (err) {
+    state.ai.error = '行情连接失败，请检查网络后重试导入。';
+    renderAIModal();
+    return;
+  }
+  const errors = [];
+  const prepared = [];
+
+  selected.forEach((item) => {
+    if (item.kind === 'cash') {
+      const amount = normalizeAIFloat(item.marketValue ?? item.qty);
+      if (!item.name) errors.push('有一项现金缺少名称');
+      else if (!(amount > 0)) errors.push(`「${item.name}」缺少金额`);
+      else prepared.push({ kind: 'cash', name: item.name, amount });
+      return;
+    }
+
+    const quote = quotes[qkey(item.kind, item.code)];
+    if (!quote) {
+      errors.push(`「${item.name || item.code}」没有查到行情，请核对代码`);
+      return;
+    }
+    let qty = normalizeAIFloat(item.qty);
+    if (!(qty > 0) && normalizeAIFloat(item.marketValue) > 0) {
+      qty = Number((normalizeAIFloat(item.marketValue) / quote.price).toFixed(2));
+    }
+    if (!(qty > 0)) {
+      errors.push(`「${item.name || item.code}」缺少数量`);
+      return;
+    }
+    const cost = normalizeAIFloat(item.cost);
+    prepared.push({
+      kind: item.kind,
+      code: item.code,
+      name: item.name || quote.name,
+      qty,
+      cost: Number.isFinite(cost) && cost > 0 ? cost : 0,
+    });
+  });
+
+  if (errors.length) {
+    state.ai.error = errors.join('；');
+    renderAIModal();
+    return;
+  }
+
+  if (state.ai.mode === 'replace') {
+    if (!window.confirm('会先清空现有股票 / 基金持仓（现金保留），再导入识别结果。确定继续吗？')) return;
+  }
+
+  if (state.ai.mode === 'replace') state.portfolio.holdings = [];
+
+  prepared.forEach((item) => {
+    if (item.kind === 'cash') {
+      const existing = state.portfolio.cash.find((entry) => entry.name === item.name);
+      if (existing) existing.amount = item.amount;
+      else state.portfolio.cash.push({ id: uid(), name: item.name, amount: item.amount });
+      return;
+    }
+    const existing = state.portfolio.holdings.find((entry) => entry.kind === item.kind && entry.code === item.code);
+    if (existing) {
+      existing.name = item.name;
+      existing.qty = item.qty;
+      existing.cost = item.cost;
+    } else {
+      state.portfolio.holdings.push({
+        id: uid(),
+        kind: item.kind,
+        code: item.code,
+        name: item.name,
+        qty: item.qty,
+        cost: item.cost,
+      });
+    }
+  });
+
+  state.portfolio.demo = false;
+  savePortfolio();
+  state.history = [];
+  saveHistory();
+  releaseAIFiles();
+  closeModal('aiModal');
+  renderAll();
+  if (el.editorModal.classList.contains('open')) renderEditor();
+  toast(`已导入 ${prepared.length} 项`);
+  refreshAll(false);
+}
+
+function handleAIAction(event) {
+  const actionElement = event.target.closest('[data-ai-action]');
+  if (actionElement) {
+    const action = actionElement.dataset.aiAction;
+    if (action === 'pick') {
+      document.getElementById('aiFileInput')?.click();
+      return;
+    }
+    if (action === 'remove') {
+      removeAIFile(actionElement.dataset.aiId);
+      return;
+    }
+    if (action === 'save-config') {
+      saveAIConfigFromForm(true);
+      return;
+    }
+    if (action === 'edit-key') {
+      state.ai.editingKey = true;
+      renderAIModal();
+      document.getElementById('aiKeyInput')?.focus();
+      return;
+    }
+    if (action === 'clear-key') {
+      if (!window.confirm('清除本机保存的智谱 API Key？')) return;
+      state.aiConfig.apiKey = '';
+      state.ai.editingKey = false;
+      saveAIConfig();
+      renderAIModal();
+      toast('已清除 AI Key');
+      return;
+    }
+    if (action === 'start' || action === 'retry') {
+      startAIRecognition();
+      return;
+    }
+    if (action === 'cancel') {
+      closeModal('aiModal');
+      return;
+    }
+    if (action === 'back') {
+      state.ai.step = 'upload';
+      state.ai.error = '';
+      state.ai.busy = false;
+      renderAIModal();
+      return;
+    }
+    if (action === 'select-ready') {
+      state.ai.results.forEach((item) => { item.selected = item.status === 'ready'; });
+      rerenderAIKeepScroll();
+      return;
+    }
+    if (action === 'add-row') {
+      state.ai.results.push({
+        id: uid(),
+        kind: 'stock',
+        code: '',
+        name: '',
+        qty: null,
+        cost: null,
+        marketValue: null,
+        profit: null,
+        confidence: 0.5,
+        quote: null,
+        selected: true,
+        status: 'needs',
+        error: '请补全',
+        source: 0,
+      });
+      rerenderAIKeepScroll();
+      return;
+    }
+    if (action === 'import') {
+      importAIResults();
+      return;
+    }
+  }
+
+  const toggle = event.target.closest('[data-ai-toggle]');
+  if (toggle) {
+    const row = toggle.closest('[data-row-id]');
+    const item = state.ai.results.find((entry) => entry.id === row?.dataset.rowId);
+    if (!item) return;
+    item.selected = !item.selected;
+    rerenderAIKeepScroll();
+    return;
+  }
+
+  const mode = event.target.closest('[data-ai-mode]');
+  if (mode) {
+    state.ai.mode = mode.dataset.aiMode;
+    rerenderAIKeepScroll();
+    return;
+  }
+
+  if (event.target.closest('#aiDrop') && !event.target.closest('button')) {
+    document.getElementById('aiFileInput')?.click();
+  }
+}
+
+function handleAIInput(event) {
+  if (event.target.id === 'aiFileInput') {
+    addAIFiles(event.target.files);
+    event.target.value = '';
+    return;
+  }
+
+  const field = event.target.dataset.field;
+  if (!field) return;
+  const row = event.target.closest('[data-row-id]');
+  const item = state.ai.results.find((entry) => entry.id === row?.dataset.rowId);
+  if (!item) return;
+
+  if (field === 'kind') {
+    item.kind = event.target.value;
+    item.quote = null;
+    evaluateAIItem(item);
+    rerenderAIKeepScroll();
+    return;
+  }
+
+  if (field === 'code') {
+    const code = event.target.value.replace(/\D/g, '').slice(0, 6);
+    event.target.value = code;
+    item.code = code;
+    item.quote = null;
+  } else if (field === 'qty' || field === 'cost' || field === 'marketValue') {
+    item[field] = event.target.value;
+  } else {
+    item[field] = event.target.value;
+  }
+
+  const wasNeeds = item.status !== 'ready';
+  evaluateAIItem(item);
+  if (wasNeeds && item.status === 'ready') item.selected = true;
+  row.classList.toggle('selected', item.selected);
+  row.classList.toggle('needs', item.status !== 'ready');
+  const status = row.querySelector('.ai-row-status');
+  if (status) {
+    status.textContent = aiItemStatusText(item);
+    status.className = 'ai-row-status ' + (item.status === 'ready' ? 'ready' : 'needs');
+  }
+  const check = row.querySelector('.ai-check');
+  if (check) check.classList.toggle('on', item.selected);
+  updateAIImportButton();
+}
+
+function handleAIDrag(event) {
+  const drop = event.target.closest('#aiDrop');
+  if (!drop) return;
+  event.preventDefault();
+  if (event.type === 'dragover' || event.type === 'dragenter') drop.classList.add('drag');
+  if (event.type === 'dragleave') drop.classList.remove('drag');
+  if (event.type === 'drop') {
+    drop.classList.remove('drag');
+    if (event.dataTransfer?.files?.length) addAIFiles(event.dataTransfer.files);
+  }
+}
+
 /* ------------------------------ Settings & backup ------------------------------ */
 
 function updateSettingsUI() {
@@ -1958,6 +3095,7 @@ function updateSettingsUI() {
   });
   el.privacySwitch.classList.toggle('on', Boolean(state.settings.privacy));
   el.privacySwitch.setAttribute('aria-checked', String(Boolean(state.settings.privacy)));
+  updateAISettingHint();
 
   const standalone = window.matchMedia?.('(display-mode: standalone)').matches || navigator.standalone === true;
   if (standalone) {
@@ -2208,7 +3346,8 @@ function bindEvents() {
     button.addEventListener('click', () => {
       const kind = button.dataset.addKind;
       closeModal('addModal');
-      openForm(kind);
+      if (kind === 'ai') openAIImport();
+      else openForm(kind);
     });
   });
   el.batchBtn.addEventListener('click', () => {
@@ -2276,8 +3415,19 @@ function bindEvents() {
   });
 
   el.editorBatchBtn.addEventListener('click', openBatch);
+  el.editorAIBtn.addEventListener('click', openAIImport);
   el.editorExportBtn.addEventListener('click', exportData);
   el.batchSaveBtn.addEventListener('click', handleBatchImport);
+  el.aiSettingBtn.addEventListener('click', openAIImport);
+
+  el.aiBody.addEventListener('click', handleAIAction);
+  el.aiFoot.addEventListener('click', handleAIAction);
+  el.aiBody.addEventListener('input', handleAIInput);
+  el.aiBody.addEventListener('change', handleAIInput);
+  el.aiBody.addEventListener('dragenter', handleAIDrag);
+  el.aiBody.addEventListener('dragover', handleAIDrag);
+  el.aiBody.addEventListener('dragleave', handleAIDrag);
+  el.aiBody.addEventListener('drop', handleAIDrag);
 
   el.refreshSeg.addEventListener('click', (event) => {
     const button = event.target.closest('button[data-refresh]');
@@ -2452,6 +3602,7 @@ function init() {
   applyPrivacy();
   bindEvents();
   registerServiceWorker();
+  updateAISettingHint();
 
   const params = new URLSearchParams(location.search);
   state.preview = params.get('preview') || '';
@@ -2469,6 +3620,7 @@ function init() {
     renderAll();
     refreshAll(false);
     if (params.get('action') === 'add') setTimeout(openAddChooser, 350);
+    if (params.get('action') === 'ai') setTimeout(openAIImport, 350);
     return;
   }
 
@@ -2486,6 +3638,7 @@ function init() {
   renderAll();
   refreshAll(false);
   if (params.get('action') === 'add') setTimeout(openAddChooser, 350);
+  if (params.get('action') === 'ai') setTimeout(openAIImport, 350);
 }
 
 init();

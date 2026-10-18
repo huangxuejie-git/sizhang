@@ -2,7 +2,7 @@
   "id": "./",
   "name": "私账 · 资产实时看板",
   "short_name": "私账",
-  "description": "股票、场外基金、现金，一处看清。行情自动更新，数据只留在本机。",
+  "description": "股票、场外基金、现金，一处看清。支持 AI 截图导入，行情自动更新，数据只留在本机。",
   "lang": "zh-CN",
   "dir": "ltr",
   "start_url": "./",
@@ -38,6 +38,12 @@
       "name": "添加资产",
       "short_name": "添加",
       "url": "./?action=add",
+      "icons": [{ "src": "./icons/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "AI 截图导入",
+      "short_name": "AI 导入",
+      "url": "./?action=ai",
       "icons": [{ "src": "./icons/icon-192.png", "sizes": "192x192" }]
     }
   ]

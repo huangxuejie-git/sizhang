@@ -151,6 +151,11 @@
       </button>
     </div>
     <div class="add-choices">
+      <button class="add-choice ai-choice" type="button" data-add-kind="ai">
+        <span class="choice-icon ai"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8V5.5A1.5 1.5 0 0 1 5.5 4H8M16 4h2.5A1.5 1.5 0 0 1 20 5.5V8M20 16v2.5a1.5 1.5 0 0 1-1.5 1.5H16M8 20H5.5A1.5 1.5 0 0 1 4 18.5V16"/><path d="M9 12h6M12 9v6"/></svg><i>AI</i></span>
+        <span><b>AI 截图导入</b><small>券商 / 基金持仓截图，一次识别多只</small></span>
+        <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+      </button>
       <button class="add-choice" type="button" data-add-kind="stock">
         <span class="choice-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 17l5-5 4 3 7-8"/><path d="M16 7h4v4"/></svg></span>
         <span><b>股票 / 场内 ETF</b><small>输入代码，实时行情</small></span>
@@ -188,6 +193,7 @@
     </div>
     <div class="sheet-body" id="editorBody"></div>
     <div class="sheet-foot editor-foot">
+      <button class="btn ghost" type="button" id="editorAIBtn">截图识别</button>
       <button class="btn ghost" type="button" id="editorBatchBtn">批量导入</button>
       <button class="btn ghost" type="button" id="editorExportBtn">导出备份</button>
     </div>
@@ -277,6 +283,10 @@
         <div class="setting-label"><span>安装到手机</span><small id="installHint">像 App 一样全屏打开</small></div>
         <button class="btn tiny" id="installBtn" type="button">安装</button>
       </section>
+      <section class="setting-row">
+        <div class="setting-label"><span>AI 截图识别</span><small id="aiSettingHint">智谱 GLM-4V · 未配置 Key</small></div>
+        <button class="btn tiny" id="aiSettingBtn" type="button">配置</button>
+      </section>
       <section class="setting-block">
         <div class="setting-label"><span>数据备份</span><small>换手机或清缓存前先导出</small></div>
         <div class="setting-actions">
@@ -288,7 +298,7 @@
         <button class="setting-link" id="aboutBtn" type="button"><span>行情与数据说明</span><span>→</span></button>
         <button class="setting-link danger" id="clearBtn" type="button"><span>清空账本</span><span>→</span></button>
       </section>
-      <p class="settings-foot">私账 v1.0 · 数据仅存本机<br>行情来自腾讯证券公开接口</p>
+      <p class="settings-foot">私账 v1.1 · 数据仅存本机<br>行情来自腾讯证券公开接口</p>
     </div>
   </div>
 </div>
@@ -309,6 +319,21 @@
       <div class="info-item"><b>你的数据</b><p>全部保存在手机浏览器的 localStorage 中，不上传服务器、不做统计。清除浏览器数据会丢失，建议定期导出备份。</p></div>
       <div class="info-item"><b>风险提示</b><p>本应用仅用于个人资产记账，不构成任何投资建议。行情可能存在延迟或错误，请以券商 / 基金公司为准。</p></div>
     </div>
+  </div>
+</div>
+
+<!-- AI 截图导入 -->
+<div class="modal" id="aiModal" aria-hidden="true">
+  <div class="sheet sheet-full ai-sheet" role="dialog" aria-modal="true" aria-labelledby="aiTitle">
+    <div class="sheet-grabber"></div>
+    <div class="sheet-head">
+      <div><span class="sub">AI IMPORT</span><h2 id="aiTitle">AI 截图导入</h2></div>
+      <button class="icon-btn sheet-close" type="button" data-close="aiModal" aria-label="关闭">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+    <div class="sheet-body ai-body" id="aiBody"></div>
+    <div class="sheet-foot ai-foot" id="aiFoot"></div>
   </div>
 </div>
 
